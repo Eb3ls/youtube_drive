@@ -1,9 +1,40 @@
 import os
 import numpy as np
 import subprocess as sp
+import reedsolo
+from Crypto.Cipher import AES
 
-W, H = 256, 144
+W, H = 1920, 1080
+BLOCK_SIZE = 2
+W_BLOCKS = W // BLOCK_SIZE
+H_BLOCKS = H // BLOCK_SIZE
+BITS_PER_FRAME = W_BLOCKS * H_BLOCKS
+BYTES_PER_FRAME = BITS_PER_FRAME // 8
 FPS = 24
+CONTAINER = "mp4"
+CODEC = "libx264"
+
+
+def encrypt_data(data: bytes, key: bytes) -> bytes:
+    cipher = AES.new(key, AES.MODE_EAX)
+    ciphertext, tag = cipher.encrypt_and_digest(data)
+
+    encrypted = cipher.nonce + tag + ciphertext
+    total_len = len(encrypted) + 16
+    encrypted = total_len.to_bytes(16, "little") + encrypted
+
+    return encrypted
+
+
+def decrypt_data(encrypted_data: bytes, key: bytes) -> bytes:
+    total_len = int.from_bytes(encrypted_data[:16], "little")
+    encrypted_data = encrypted_data[16:total_len]
+    nonce = encrypted_data[:16]
+    tag = encrypted_data[16:32]
+    ciphertext = encrypted_data[32:]
+    cipher = AES.new(key, AES.MODE_EAX, nonce=nonce)
+    data = cipher.decrypt_and_verify(ciphertext, tag)
+    return data
 
 
 def create_header(filename: str, data_size: int) -> bytes:
@@ -81,8 +112,10 @@ def read_video(filename: str) -> bytes:
         "ffmpeg",
         "-loglevel",
         "error",
+        # input options
         "-i",
         filename,
+        # output options
         "-f",
         "rawvideo",
         "-pix_fmt",
@@ -102,18 +135,23 @@ def read_video(filename: str) -> bytes:
     return raw_video
 
 
-def data2video(data: np.ndarray, filename="output.mp4"):
+def data2video(data: bytes, filename: str):
 
-    if data.ndim != 4:
-        raise ValueError("Data must be a 4D numpy array")
-    if data.shape[1:] != (H, W, 3):
-        raise ValueError(f"Data shape must be (N, {H}, {W}, 3)")
+    if not isinstance(data, (bytes, bytearray)):
+        raise TypeError("Data must be bytes or bytearray")
+
+    array = np.frombuffer(data, dtype=np.uint8)
+    if array.size % (W * H * 3) != 0:
+        raise ValueError("Data size is not compatible with video dimensions")
+
+    array = array.reshape((-1, H, W, 3))
 
     command = [
         "ffmpeg",
         "-y",
         "-loglevel",
         "error",
+        # input options
         "-f",
         "rawvideo",
         "-pix_fmt",
@@ -124,14 +162,23 @@ def data2video(data: np.ndarray, filename="output.mp4"):
         str(FPS),
         "-i",
         "-",
+        # output options
         "-c:v",
-        "ffv1",
+        CODEC,
+        "-pix_fmt",
+        "yuv420p",
+        "-preset",
+        "veryslow",
+        "-crf",
+        "18",
+        "-movflags",
+        "+faststart",
         filename,
     ]
 
     proc = sp.Popen(command, stdin=sp.PIPE)
     try:
-        proc.communicate(input=data.tobytes())
+        proc.communicate(input=array.tobytes())
     except Exception as e:
         print(f"Error during ffmpeg processing: {e}")
 
@@ -146,7 +193,6 @@ def data2file(data: bytes):
         raise TypeError("Data must be bytes or bytearray")
 
     header_len = int.from_bytes(data[0:4], "little")
-    print(f"Header length: {header_len} bytes")
 
     header_bytes = data[0:header_len]
     try:
@@ -165,27 +211,112 @@ def data2file(data: bytes):
     print(f"File saved as {filename}")
 
 
+def bits_interpolation(data: bytes) -> bytes:
+    bits = np.unpackbits(np.frombuffer(data, dtype=np.uint8))
+
+    # padding bits to make complete frames
+    total_bits = len(bits)
+    remainder = total_bits % BITS_PER_FRAME
+    if remainder != 0:
+        padding = BITS_PER_FRAME - remainder
+        bits = np.concatenate((bits, np.zeros(padding, dtype=np.uint8)))
+
+    bits_array = bits.reshape(-1, H_BLOCKS, W_BLOCKS, 1)
+
+    expanded = bits_array.repeat(BLOCK_SIZE, axis=1).repeat(BLOCK_SIZE, axis=2)
+
+    expanded = expanded * 255
+
+    final_array = expanded.repeat(3, axis=3)
+
+    return final_array.tobytes()
+
+
+def bits_deinterpolation(data: bytes) -> bytes:
+    array = np.frombuffer(data, dtype=np.uint8)
+    array = array.reshape(-1, H, W, 3)
+
+    gray = array.mean(axis=3)
+
+    blocks = gray.reshape(-1, H_BLOCKS, BLOCK_SIZE, W_BLOCKS, BLOCK_SIZE)
+
+    block_means = blocks.mean(axis=(2, 4))
+
+    bits = (block_means > 128).astype(np.uint8)
+
+    bytes_data = np.packbits(bits.flatten())
+
+    return bytes_data.tobytes()
+
+
+def encode_data(rsc: reedsolo.RSCodec, data: bytes) -> bytes:
+    encoded_data = rsc.encode(data)
+    encoded_data = bytes(encoded_data)
+
+    total_bytes = len(encoded_data)
+    encoded_data = total_bytes.to_bytes(16, "little") + encoded_data
+    total_bytes += 16
+
+    remainder = total_bytes % BYTES_PER_FRAME
+    if remainder != 0:
+        padding = BYTES_PER_FRAME - remainder
+        encoded_data += bytes([0] * padding)
+
+    return encoded_data
+
+
+def decode_data(rsc: reedsolo.RSCodec, data: bytes) -> bytes:
+    total_bytes = int.from_bytes(data[:16], "little")
+    data = data[16 : 16 + total_bytes]
+    decoded_data, _, _ = rsc.decode(data)
+    return bytes(decoded_data)
+
+
 if __name__ == "__main__":
-    filename = "example.txt"
-    with open(filename, "rb") as f:
+
+    # generate a random AES key
+    if not os.path.exists("aes_key.bin"):
+        key = os.urandom(16)
+        with open("aes_key.bin", "wb") as f:
+            f.write(key)
+    else:
+        with open("aes_key.bin", "rb") as f:
+            key = f.read()
+
+    # initialize Reed-Solomon codec
+    rsc = reedsolo.RSCodec(32)
+
+    in_filename = "example.txt"
+    with open(in_filename, "rb") as f:
         data = f.read()
 
-    data = np.frombuffer(data, dtype=np.uint8)
-    header = create_header(filename, data.size)
-    data = np.concatenate((np.frombuffer(header, dtype=np.uint8), data))
+    header = create_header(in_filename, len(data))
+    data = header + data
 
-    # calculate number of complete 3-channel pixels
-    frame_size = H * W * 3
-    missing_values = frame_size - (data.size % frame_size)
-    if missing_values != 0:
-        # adding missing values as zeros
-        data = np.concatenate((data, np.zeros(missing_values, dtype=np.uint8)))
+    # encryption
+    data = encrypt_data(data, key)
 
-    data_array = data.reshape((-1, H, W, 3))
+    # encode with Reed-Solomon
+    encoded_data = encode_data(rsc, data)
 
-    # data to video with ffmpeg
-    data2video(data_array, filename="output.mkv")
+    # interpolation to video frames
+    video_data = bits_interpolation(encoded_data)
 
-    # video to file
-    raw_data = read_video("output.mkv")
-    data2file(raw_data)
+    # saving to video file
+    out_filename = f"output.{CONTAINER}"
+    data2video(video_data, filename=out_filename)
+
+    # reading video
+    raw_video = read_video(out_filename)
+    # de-interpolation to bit stream
+    recovered_stream = bits_deinterpolation(raw_video)
+
+    try:
+        # decode with Reed-Solomon
+        decoded_data = decode_data(rsc, recovered_stream)
+        # decryption
+        decrypted_data = decrypt_data(decoded_data, key)
+        # saving restored file
+        data2file(decrypted_data)
+    except Exception as e:
+        print(f"Error during data recovery: {e}")
