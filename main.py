@@ -4,13 +4,19 @@ import subprocess as sp
 import reedsolo
 from Crypto.Cipher import AES
 
-W, H = 1920, 1080
+# yt needs at least 32 frames to allow the upload
+# this value should be adjusted based on the data size
+W, H = 640, 360
 BLOCK_SIZE = 2
 W_BLOCKS = W // BLOCK_SIZE
 H_BLOCKS = H // BLOCK_SIZE
 BITS_PER_FRAME = W_BLOCKS * H_BLOCKS
 BYTES_PER_FRAME = BITS_PER_FRAME // 8
-FPS = 24
+# low framerate so that the video has more duration
+# i think that yt has a minimum duration requirement of 1 second
+# if file is small its more likely to pass the check
+FPS = 6
+RS_ERROR_CORRECTION_BYTES = 8
 CONTAINER = "mp4"
 CODEC = "libx264"
 
@@ -233,6 +239,7 @@ def bits_interpolation(data: bytes) -> bytes:
 
 
 def bits_deinterpolation(data: bytes) -> bytes:
+
     array = np.frombuffer(data, dtype=np.uint8)
     array = array.reshape(-1, H, W, 3)
 
@@ -242,7 +249,7 @@ def bits_deinterpolation(data: bytes) -> bytes:
 
     block_means = blocks.mean(axis=(2, 4))
 
-    bits = (block_means > 128).astype(np.uint8)
+    bits = (block_means > 127).astype(np.uint8)
 
     bytes_data = np.packbits(bits.flatten())
 
@@ -284,7 +291,7 @@ if __name__ == "__main__":
             key = f.read()
 
     # initialize Reed-Solomon codec
-    rsc = reedsolo.RSCodec(32)
+    rsc = reedsolo.RSCodec(RS_ERROR_CORRECTION_BYTES)
 
     in_filename = "example.txt"
     with open(in_filename, "rb") as f:
@@ -308,15 +315,13 @@ if __name__ == "__main__":
 
     # reading video
     raw_video = read_video(out_filename)
+
     # de-interpolation to bit stream
     recovered_stream = bits_deinterpolation(raw_video)
 
-    try:
-        # decode with Reed-Solomon
-        decoded_data = decode_data(rsc, recovered_stream)
-        # decryption
-        decrypted_data = decrypt_data(decoded_data, key)
-        # saving restored file
-        data2file(decrypted_data)
-    except Exception as e:
-        print(f"Error during data recovery: {e}")
+    # decode with Reed-Solomon
+    decoded_data = decode_data(rsc, recovered_stream)
+    # decryption
+    decrypted_data = decrypt_data(decoded_data, key)
+    # saving restored file
+    data2file(decrypted_data)
