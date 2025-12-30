@@ -1,5 +1,6 @@
 venv
 .vscode
-*.txt
 *.bin
 *.mp4
+__pycache__/
+*.json

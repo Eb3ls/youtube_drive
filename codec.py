@@ -3,6 +3,7 @@ import numpy as np
 import subprocess as sp
 import reedsolo
 from Crypto.Cipher import AES
+from zstandard import ZstdCompressor, ZstdDecompressor
 
 # yt needs at least 32 frames to allow the upload
 # this value should be adjusted based on the data size
@@ -19,22 +20,25 @@ FPS = 6
 RS_ERROR_CORRECTION_BYTES = 8
 CONTAINER = "mp4"
 CODEC = "libx264"
+COOKIES_PATH = "youtube_cookies.json"
+zstd_compressor = ZstdCompressor(level=3, write_checksum=True)
+zstd_decompressor = ZstdDecompressor()
 
 
-def encrypt_data(data: bytes, key: bytes) -> bytes:
+def encrypt_bytes_eax(data: bytes, key: bytes) -> bytes:
     cipher = AES.new(key, AES.MODE_EAX)
     ciphertext, tag = cipher.encrypt_and_digest(data)
 
     encrypted = cipher.nonce + tag + ciphertext
-    total_len = len(encrypted) + 16
-    encrypted = total_len.to_bytes(16, "little") + encrypted
+    total_len = len(encrypted) + 8
+    encrypted = total_len.to_bytes(8, "little") + encrypted
 
     return encrypted
 
 
-def decrypt_data(encrypted_data: bytes, key: bytes) -> bytes:
-    total_len = int.from_bytes(encrypted_data[:16], "little")
-    encrypted_data = encrypted_data[16:total_len]
+def decrypt_bytes_eax(encrypted_data: bytes, key: bytes) -> bytes:
+    total_len = int.from_bytes(encrypted_data[:8], "little")
+    encrypted_data = encrypted_data[8:total_len]
     nonce = encrypted_data[:16]
     tag = encrypted_data[16:32]
     ciphertext = encrypted_data[32:]
@@ -43,7 +47,7 @@ def decrypt_data(encrypted_data: bytes, key: bytes) -> bytes:
     return data
 
 
-def create_header(filename: str, data_size: int) -> bytes:
+def build_file_header(filename: str, data_size: int) -> bytes:
 
     name, ext = os.path.splitext(os.path.basename(filename))
     ext = ext.lstrip(".")
@@ -67,7 +71,7 @@ def create_header(filename: str, data_size: int) -> bytes:
     return header
 
 
-def decode_header(buf: bytes) -> dict[str, int | str]:
+def parse_file_header(buf: bytes) -> dict[str, int | str]:
 
     if not isinstance(buf, (bytes, bytearray)):
         raise TypeError("Buffer must be bytes or bytearray")
@@ -109,7 +113,7 @@ def decode_header(buf: bytes) -> dict[str, int | str]:
     }
 
 
-def read_video(filename: str) -> bytes:
+def load_raw_video(filename: str) -> bytes:
 
     if not os.path.exists(filename):
         raise FileNotFoundError(f"Video file {filename} not found")
@@ -141,7 +145,7 @@ def read_video(filename: str) -> bytes:
     return raw_video
 
 
-def data2video(data: bytes, filename: str):
+def bytes_to_video_file(data: bytes, filename: str):
 
     if not isinstance(data, (bytes, bytearray)):
         raise TypeError("Data must be bytes or bytearray")
@@ -194,7 +198,7 @@ def data2video(data: bytes, filename: str):
     print(f"Video saved as {filename}")
 
 
-def data2file(data: bytes):
+def bytes_to_output_file(data: bytes):
     if not isinstance(data, (bytes, bytearray)):
         raise TypeError("Data must be bytes or bytearray")
 
@@ -202,7 +206,7 @@ def data2file(data: bytes):
 
     header_bytes = data[0:header_len]
     try:
-        header = decode_header(header_bytes)
+        header = parse_file_header(header_bytes)
     except TypeError as e:
         print(f"Error decoding header: {e}")
         return
@@ -211,13 +215,16 @@ def data2file(data: bytes):
     file_data = data[header_len : header_len + payload]
     filename = f"{header['name']}_restored.{header['ext']}"
 
+    # decompression
+    file_data = zstd_decompressor.decompress(file_data)
+
     with open(filename, "wb") as f:
         f.write(file_data)
 
     print(f"File saved as {filename}")
 
 
-def bits_interpolation(data: bytes) -> bytes:
+def expand_bits_to_frames(data: bytes) -> bytes:
     bits = np.unpackbits(np.frombuffer(data, dtype=np.uint8))
 
     # padding bits to make complete frames
@@ -226,6 +233,14 @@ def bits_interpolation(data: bytes) -> bytes:
     if remainder != 0:
         padding = BITS_PER_FRAME - remainder
         bits = np.concatenate((bits, np.zeros(padding, dtype=np.uint8)))
+
+    # if we don't have enough bits for at least FPS frames, pad more
+    total_bits = len(bits)
+    total_frames = total_bits // BITS_PER_FRAME
+    if total_frames < FPS:
+        needed_frames = FPS - total_frames
+        padding_bits = needed_frames * BITS_PER_FRAME
+        bits = np.concatenate((bits, np.zeros(padding_bits, dtype=np.uint8)))
 
     bits_array = bits.reshape(-1, H_BLOCKS, W_BLOCKS, 1)
 
@@ -238,7 +253,7 @@ def bits_interpolation(data: bytes) -> bytes:
     return final_array.tobytes()
 
 
-def bits_deinterpolation(data: bytes) -> bytes:
+def collapse_frames_to_bits(data: bytes) -> bytes:
 
     array = np.frombuffer(data, dtype=np.uint8)
     array = array.reshape(-1, H, W, 3)
@@ -256,13 +271,13 @@ def bits_deinterpolation(data: bytes) -> bytes:
     return bytes_data.tobytes()
 
 
-def encode_data(rsc: reedsolo.RSCodec, data: bytes) -> bytes:
+def encode_reed_solomon(rsc: reedsolo.RSCodec, data: bytes) -> bytes:
     encoded_data = rsc.encode(data)
     encoded_data = bytes(encoded_data)
 
     total_bytes = len(encoded_data)
-    encoded_data = total_bytes.to_bytes(16, "little") + encoded_data
-    total_bytes += 16
+    encoded_data = total_bytes.to_bytes(8, "little") + encoded_data
+    total_bytes += 8
 
     remainder = total_bytes % BYTES_PER_FRAME
     if remainder != 0:
@@ -272,56 +287,46 @@ def encode_data(rsc: reedsolo.RSCodec, data: bytes) -> bytes:
     return encoded_data
 
 
-def decode_data(rsc: reedsolo.RSCodec, data: bytes) -> bytes:
-    total_bytes = int.from_bytes(data[:16], "little")
-    data = data[16 : 16 + total_bytes]
+def decode_reed_solomon(rsc: reedsolo.RSCodec, data: bytes) -> bytes:
+    total_bytes = int.from_bytes(data[:8], "little")
+    data = data[8 : 8 + total_bytes]
     decoded_data, _, _ = rsc.decode(data)
     return bytes(decoded_data)
 
 
-if __name__ == "__main__":
-
-    # generate a random AES key
-    if not os.path.exists("aes_key.bin"):
-        key = os.urandom(16)
-        with open("aes_key.bin", "wb") as f:
-            f.write(key)
-    else:
-        with open("aes_key.bin", "rb") as f:
-            key = f.read()
-
-    # initialize Reed-Solomon codec
-    rsc = reedsolo.RSCodec(RS_ERROR_CORRECTION_BYTES)
-
-    in_filename = "example.txt"
-    with open(in_filename, "rb") as f:
+def convert_file_to_video(
+    filename: str, out_filename: str, key: bytes, rsc: reedsolo.RSCodec
+):
+    with open(filename, "rb") as f:
         data = f.read()
 
-    header = create_header(in_filename, len(data))
+    # compression
+    data = zstd_compressor.compress(data)
+
+    header = build_file_header(filename, len(data))
     data = header + data
-
     # encryption
-    data = encrypt_data(data, key)
-
+    data = encrypt_bytes_eax(data, key)
     # encode with Reed-Solomon
-    encoded_data = encode_data(rsc, data)
-
+    encoded_data = encode_reed_solomon(rsc, data)
     # interpolation to video frames
-    video_data = bits_interpolation(encoded_data)
-
+    video_data = expand_bits_to_frames(encoded_data)
     # saving to video file
-    out_filename = f"output.{CONTAINER}"
-    data2video(video_data, filename=out_filename)
+    bytes_to_video_file(video_data, filename=out_filename)
+    print(f"Generated video file: {out_filename}")
 
+
+def extract_file_from_video(video_filename: str, key: bytes, rsc: reedsolo.RSCodec):
     # reading video
-    raw_video = read_video(out_filename)
-
+    raw_video = load_raw_video(video_filename)
     # de-interpolation to bit stream
-    recovered_stream = bits_deinterpolation(raw_video)
-
+    recovered_stream = collapse_frames_to_bits(raw_video)
     # decode with Reed-Solomon
-    decoded_data = decode_data(rsc, recovered_stream)
+    decoded_data = decode_reed_solomon(rsc, recovered_stream)
     # decryption
-    decrypted_data = decrypt_data(decoded_data, key)
+    decrypted_data = decrypt_bytes_eax(decoded_data, key)
     # saving restored file
-    data2file(decrypted_data)
+    bytes_to_output_file(decrypted_data)
+    # deleting temporary video file
+    os.remove(video_filename)
+    print(f"Restored file from video: {video_filename}")
