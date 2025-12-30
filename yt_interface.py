@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
     Playwright,
@@ -8,6 +9,8 @@ from playwright.sync_api import (
 )
 
 COOKIES_PATH = "yt_cookies.json"
+# TODO: not all videos are loaded at once, API to find all videos may be needed
+# anyway need to use the search bar to click the correct options
 
 
 def upload_video_to_youtube(video_path: str, page: Page) -> None:
@@ -63,7 +66,7 @@ def delete_video(page: Page, video_title: str) -> None:
     page.click("ytcp-button#confirm-button")
 
 
-def download_video(page: Page, video_title: str) -> None:
+def download_video(page: Page, video_title: str, dest_dir: Path) -> str:
     row = page.locator(".ytcp-video-list-cell-video.right-section").filter(
         has_text=video_title
     )
@@ -71,10 +74,17 @@ def download_video(page: Page, video_title: str) -> None:
         raise Exception(f"Video titled '{video_title}' not found on the page.")
 
     row.hover()
-    row.locator('[aria-label="Options"]').click()
+    with page.expect_download() as download_info:
+        row.locator('[aria-label="Options"]').click()
+        page.click("tp-yt-paper-item:has-text('Download')")
 
-    page.click("tp-yt-paper-item:has-text('Download')")
-    print(f"Download initiated for video titled '{video_title}'.")
+    # save download
+    download = download_info.value
+    filename = download.suggested_filename or "downloaded_video"
+    dest_path = os.path.join(dest_dir, filename)
+    download.save_as(dest_path)
+
+    return dest_path
 
 
 def create_yt_istance(sync_p: Playwright) -> tuple[Browser, BrowserContext, Page]:

@@ -30,13 +30,13 @@ from yt_interface import (
     delete_video,
     upload_video_to_youtube,
     get_video_list,
+    download_video,
 )
 from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
 import reedsolo
 
 
 TRANSFER_TEXT = "Uploading to YT"
-TRANSFER_MS = 10_000
 
 
 class FileTransferWindow(QMainWindow):
@@ -150,7 +150,6 @@ class FileTransferWindow(QMainWindow):
 
     def show_temporary_status(self, label: QLabel):
         label.setText(TRANSFER_TEXT)
-        QTimer.singleShot(TRANSFER_MS, lambda: label.setText(""))
 
     def handle_local_double_click(self, _item: QListWidgetItem):
         if _item is None:
@@ -272,7 +271,6 @@ class FileTransferWindow(QMainWindow):
         target = Path(path).expanduser().resolve()
         if not target.is_dir():
             self.left_status.setText("Invalid path")
-            QTimer.singleShot(TRANSFER_MS, lambda: self.left_status.setText(""))
             return
         self.current_dir = target
         os.chdir(self.current_dir)
@@ -297,7 +295,6 @@ class FileTransferWindow(QMainWindow):
         file_path = self.current_dir / filename
         if not file_path.is_file():
             self.left_status.setText("Select a valid file")
-            QTimer.singleShot(TRANSFER_MS, lambda: self.left_status.setText(""))
             return
 
         # ask for title
@@ -311,7 +308,6 @@ class FileTransferWindow(QMainWindow):
         title = title.strip()
         if not ok or not title:
             self.left_status.setText("Upload cancelled (no title)")
-            QTimer.singleShot(TRANSFER_MS, lambda: self.left_status.setText(""))
             return
 
         existing_titles = set()
@@ -340,8 +336,6 @@ class FileTransferWindow(QMainWindow):
             self.filter_remote_list(self.right_search.text())
         except Exception as exc:
             self.show_error_popup(f"Error: {exc}")
-        finally:
-            QTimer.singleShot(TRANSFER_MS, lambda: self.left_status.setText(""))
 
     def _load_or_create_key(self) -> bytes:
         key_path = self.current_dir / "aes_key.bin"
@@ -352,19 +346,19 @@ class FileTransferWindow(QMainWindow):
         return key
 
     def process_remote_file(self, filename: str):
-        file_path = self.current_dir / filename
-        print("Not implemented yet")
-        return
         try:
+            self.right_status.setText("Downloading...")
+            QApplication.processEvents()
+            file_path = download_video(self.page, filename, self.current_dir)
+
             self.right_status.setText("Decoding video...")
+            QApplication.processEvents()
             extract_file_from_video(str(file_path), self.key, self.rsc)
 
-            self.load_remote_items()
+            self.load_local_items()
             self.right_status.setText("Restore completed")
         except Exception as exc:
             self.show_error_popup(f"Error: {exc}")
-        finally:
-            QTimer.singleShot(TRANSFER_MS, lambda: self.right_status.setText(""))
 
 
 def launch_transfer_gui():

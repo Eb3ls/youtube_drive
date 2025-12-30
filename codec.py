@@ -36,6 +36,9 @@ def encrypt_bytes_eax(data: bytes, key: bytes) -> bytes:
     return encrypted
 
 
+# TODO: faster interpolation and video encoding
+
+
 def decrypt_bytes_eax(encrypted_data: bytes, key: bytes) -> bytes:
     total_len = int.from_bytes(encrypted_data[:8], "little")
     encrypted_data = encrypted_data[8:total_len]
@@ -113,10 +116,10 @@ def parse_file_header(buf: bytes) -> dict[str, int | str]:
     }
 
 
-def load_raw_video(filename: str) -> bytes:
+def load_raw_video(video_path: str) -> bytes:
 
-    if not os.path.exists(filename):
-        raise FileNotFoundError(f"Video file {filename} not found")
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Video file {video_path} not found")
 
     command = [
         "ffmpeg",
@@ -124,7 +127,7 @@ def load_raw_video(filename: str) -> bytes:
         "error",
         # input options
         "-i",
-        filename,
+        video_path,
         # output options
         "-f",
         "rawvideo",
@@ -213,15 +216,24 @@ def bytes_to_output_file(data: bytes):
 
     payload = int(header["payload"])
     file_data = data[header_len : header_len + payload]
-    filename = f"{header['name']}_restored.{header['ext']}"
+    filename = f"{header['name']}.{header['ext']}"
+
+    # avoid overwriting existing files
+    if os.path.exists(filename):
+        base, ext = os.path.splitext(filename)
+        count = 1
+        while True:
+            new_filename = f"{base}_{count}{ext}"
+            if not os.path.exists(new_filename):
+                filename = new_filename
+                break
+            count += 1
 
     # decompression
     file_data = zstd_decompressor.decompress(file_data)
 
     with open(filename, "wb") as f:
         f.write(file_data)
-
-    print(f"File saved as {filename}")
 
 
 def expand_bits_to_frames(data: bytes) -> bytes:
@@ -316,9 +328,9 @@ def convert_file_to_video(
     print(f"Generated video file: {out_filename}")
 
 
-def extract_file_from_video(video_filename: str, key: bytes, rsc: reedsolo.RSCodec):
+def extract_file_from_video(video_path: str, key: bytes, rsc: reedsolo.RSCodec):
     # reading video
-    raw_video = load_raw_video(video_filename)
+    raw_video = load_raw_video(video_path)
     # de-interpolation to bit stream
     recovered_stream = collapse_frames_to_bits(raw_video)
     # decode with Reed-Solomon
@@ -328,5 +340,4 @@ def extract_file_from_video(video_filename: str, key: bytes, rsc: reedsolo.RSCod
     # saving restored file
     bytes_to_output_file(decrypted_data)
     # deleting temporary video file
-    os.remove(video_filename)
-    print(f"Restored file from video: {video_filename}")
+    os.remove(video_path)
