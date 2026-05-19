@@ -20,7 +20,6 @@ FPS = 6
 RS_ERROR_CORRECTION_BYTES = 8
 CONTAINER = "mp4"
 CODEC = "libx264"
-COOKIES_PATH = "youtube_cookies.json"
 zstd_compressor = ZstdCompressor(level=3, write_checksum=True)
 zstd_decompressor = ZstdDecompressor()
 
@@ -34,9 +33,6 @@ def encrypt_bytes_eax(data: bytes, key: bytes) -> bytes:
     encrypted = total_len.to_bytes(8, "little") + encrypted
 
     return encrypted
-
-
-# TODO: faster interpolation and video encoding
 
 
 def decrypt_bytes_eax(encrypted_data: bytes, key: bytes) -> bytes:

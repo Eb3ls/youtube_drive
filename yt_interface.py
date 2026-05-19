@@ -9,8 +9,6 @@ from playwright.sync_api import (
 )
 
 COOKIES_PATH = "yt_cookies.json"
-# TODO: not all videos are loaded at once, API to find all videos may be needed
-# anyway need to use the search bar to click the correct options
 
 
 def upload_video_to_youtube(video_path: str, page: Page) -> None:
@@ -87,7 +85,7 @@ def download_video(page: Page, video_title: str, dest_dir: Path) -> str:
     return dest_path
 
 
-def create_yt_istance(sync_p: Playwright) -> tuple[Browser, BrowserContext, Page]:
+def create_yt_instance(sync_p: Playwright) -> tuple[Browser, BrowserContext, Page]:
     browser = sync_p.firefox.launch(headless=False)
 
     context = browser.new_context(

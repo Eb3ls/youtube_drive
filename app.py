@@ -26,7 +26,7 @@ from codec import (
     extract_file_from_video,
 )
 from yt_interface import (
-    create_yt_istance,
+    create_yt_instance,
     delete_video,
     upload_video_to_youtube,
     get_video_list,
@@ -364,7 +364,7 @@ class FileTransferWindow(QMainWindow):
 def launch_transfer_gui():
     app = QApplication(sys.argv)
     with sync_playwright() as p:
-        browser, context, page = create_yt_istance(p)
+        browser, context, page = create_yt_instance(p)
         window = FileTransferWindow(browser, context, page)
         window.show()
         sys.exit(app.exec())
