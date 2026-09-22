@@ -212,7 +212,9 @@ def bytes_to_output_file(data: bytes):
 
     payload = int(header["payload"])
     file_data = data[header_len : header_len + payload]
-    filename = f"{header['name']}.{header['ext']}"
+    filename = header["name"]
+    if header["ext"]:
+        filename += f".{header['ext']}"
 
     # avoid overwriting existing files
     if os.path.exists(filename):
@@ -325,6 +327,7 @@ def convert_file_to_video(
 
 
 def extract_file_from_video(video_path: str, key: bytes, rsc: reedsolo.RSCodec):
+    """Restore into the working directory, leaving the input video to its caller."""
     # reading video
     raw_video = load_raw_video(video_path)
     # de-interpolation to bit stream
@@ -335,5 +338,3 @@ def extract_file_from_video(video_path: str, key: bytes, rsc: reedsolo.RSCodec):
     decrypted_data = decrypt_bytes_eax(decoded_data, key)
     # saving restored file
     bytes_to_output_file(decrypted_data)
-    # deleting temporary video file
-    os.remove(video_path)

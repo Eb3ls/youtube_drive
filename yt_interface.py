@@ -1,4 +1,6 @@
 import os
+import re
+import tempfile
 from pathlib import Path
 from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
@@ -50,12 +52,25 @@ def get_video_list(page: Page) -> list[str]:
     return titles
 
 
-def delete_video(page: Page, video_title: str) -> None:
-    row = page.locator(".ytcp-video-list-cell-video.right-section").filter(
-        has_text=video_title
+def _find_video_row(page: Page, video_title: str):
+    title = page.locator("a#video-title").filter(
+        has_text=re.compile(rf"^\s*{re.escape(video_title)}\s*$")
     )
-    if row.count() == 0:
+    row = page.locator(".ytcp-video-list-cell-video.right-section").filter(
+        has=title
+    )
+    count = row.count()
+    if count == 0:
         raise Exception(f"Video titled '{video_title}' not found on the page.")
+    if count > 1:
+        raise Exception(
+            f"Multiple videos are titled '{video_title}'. Rename them in YouTube Studio first."
+        )
+    return row
+
+
+def delete_video(page: Page, video_title: str) -> None:
+    row = _find_video_row(page, video_title)
 
     row.hover()
     row.locator('[aria-label="Options"]').click()
@@ -65,22 +80,24 @@ def delete_video(page: Page, video_title: str) -> None:
 
 
 def download_video(page: Page, video_title: str, dest_dir: Path) -> str:
-    row = page.locator(".ytcp-video-list-cell-video.right-section").filter(
-        has_text=video_title
-    )
-    if row.count() == 0:
-        raise Exception(f"Video titled '{video_title}' not found on the page.")
-
+    """Save to a unique temporary path that the caller owns and must clean up."""
+    row = _find_video_row(page, video_title)
     row.hover()
     with page.expect_download() as download_info:
         row.locator('[aria-label="Options"]').click()
         page.click("tp-yt-paper-item:has-text('Download')")
 
-    # save download
+    # Reserve a unique path; the remote filename must never overwrite a local file.
     download = download_info.value
-    filename = download.suggested_filename or "downloaded_video"
-    dest_path = os.path.join(dest_dir, filename)
-    download.save_as(dest_path)
+    with tempfile.NamedTemporaryFile(
+        prefix="youtube-drive-", suffix=".mp4", dir=dest_dir, delete=False
+    ) as temporary:
+        dest_path = temporary.name
+    try:
+        download.save_as(dest_path)
+    except Exception:
+        Path(dest_path).unlink(missing_ok=True)
+        raise
 
     return dest_path
 
