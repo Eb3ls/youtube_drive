@@ -1,6 +1,7 @@
 import os
 import sys
-from pathlib import Path
+import tempfile
+from pathlib import Path, PureWindowsPath
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QApplication,
@@ -310,6 +311,15 @@ class FileTransferWindow(QMainWindow):
             self.left_status.setText("Upload cancelled (no title)")
             return
 
+        if any(char in '<>:"/\\|?*' or ord(char) < 32 for char in title):
+            self.show_error_popup(
+                'Video titles cannot contain < > : " / \\ | ? * or control characters.'
+            )
+            return
+        if PureWindowsPath(f"{title}.{CONTAINER}").is_reserved():
+            self.show_error_popup("This title is reserved on Windows. Choose another title.")
+            return
+
         existing_titles = set()
         for i in range(self.right_list.count()):
             item = self.right_list.item(i)
@@ -320,16 +330,14 @@ class FileTransferWindow(QMainWindow):
             return
 
         try:
-            output_path = self.current_dir / f"{title}.{CONTAINER}"
-            self.left_status.setText("Encoding to video...")
-            convert_file_to_video(str(file_path), str(output_path), self.key, self.rsc)
-            self.left_status.setText("Uploading...")
-            print(f"Uploading {output_path} to YouTube with title '{title}'")
-            upload_video_to_youtube(str(output_path), self.page)
+            with tempfile.TemporaryDirectory(prefix="youtube-drive-upload-") as temp_dir:
+                output_path = Path(temp_dir) / f"{title}.{CONTAINER}"
+                self.left_status.setText("Encoding to video...")
+                convert_file_to_video(str(file_path), str(output_path), self.key, self.rsc)
+                self.left_status.setText("Uploading...")
+                print(f"Uploading {output_path} to YouTube with title '{title}'")
+                upload_video_to_youtube(str(output_path), self.page)
             self.left_status.setText("Upload completed")
-
-            # removing the temporary video file
-            os.remove(output_path)
 
             # append the new title to the remote list and apply current filter
             self.right_list.addItem(QListWidgetItem(title))
@@ -347,13 +355,14 @@ class FileTransferWindow(QMainWindow):
 
     def process_remote_file(self, filename: str):
         try:
-            self.right_status.setText("Downloading...")
-            QApplication.processEvents()
-            file_path = download_video(self.page, filename, self.current_dir)
+            with tempfile.TemporaryDirectory(prefix="youtube-drive-download-") as temp_dir:
+                self.right_status.setText("Downloading...")
+                QApplication.processEvents()
+                file_path = download_video(self.page, filename, Path(temp_dir))
 
-            self.right_status.setText("Decoding video...")
-            QApplication.processEvents()
-            extract_file_from_video(str(file_path), self.key, self.rsc)
+                self.right_status.setText("Decoding video...")
+                QApplication.processEvents()
+                extract_file_from_video(str(file_path), self.key, self.rsc)
 
             self.load_local_items()
             self.right_status.setText("Restore completed")
